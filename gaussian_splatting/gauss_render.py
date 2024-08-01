@@ -4,6 +4,8 @@ import torch.nn as nn
 import math
 from einops import reduce
 
+import gaussian_splatting.util_gau as util_gau
+ 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
@@ -229,7 +231,16 @@ class GaussRenderer(nn.Module):
         scales = pc.get_scaling
         rotations = pc.get_rotation
         shs = pc.get_features
-        
+
+        # (bong-furiosa)
+        # ply 파일에는 (xyz, rots, scales, opacities, shs) 데이터가 들어있습니다.
+        gs = util_gau.load_ply("/home/bongwon/Desktop/3DGS_playground/GaussianSplattingViewer/models/bicycle/point_cloud/iteration_7000/point_cloud.ply")
+        means3D = torch.from_numpy(gs.xyz).cuda()
+        opacity = torch.from_numpy(gs.opacity).cuda()
+        scales = torch.from_numpy(gs.scale).cuda()
+        rotations = torch.from_numpy(gs.rot).cuda()
+        shs = torch.from_numpy(gs.sh.reshape((rotations.shape[0], -1, 3))).cuda()
+
         if USE_PROFILE:
             prof = profiler.record_function
         else:
@@ -263,6 +274,22 @@ class GaussRenderer(nn.Module):
             mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)
         
+        # (bong-furiosa)
+        # TODO: 아래와 같은 RuntimeError를 '올바르게' 해결해야합니다.
+        #
+        # >> File "/home/bongwon/Desktop/torch-splatting-bong/gaussian_splatting/gauss_render.py", line 137, in get_rect
+        # >> rect_min = (pix_coord - radii[:,None])
+        # >> RuntimeError: The size of tensor a (2337600) must match the size of tensor b (3616103) at non-singleton dimension 0
+        #
+        # self.render 함수의 입력 텐서 모양은 아래와 같습니다.
+        #   1. means2D    -> torch.Size([2178745, 2])
+        #   2. cov2d      -> torch.Size([3616103, 2, 2])
+        #   3. color      -> torch.Size([3616103, 3])
+        #   4. opacity    -> torch.Size([3616103, 1])
+        #   5. depths     -> torch.Size([2178745])
+        # 여기서 means2D와 depths는 render 이전 연산들에 의해 0-dim이 2178745으로 변경되었습니다.
+        # 이러한 변경이 GaussianSplattingViewer에서도 동일하게 발생했는지 교차 확인도 필요합니다.
+        print(camera, means2D.shape, cov2d.shape, color.shape, opacity.shape, depths.shape)
         with prof("render"):
             rets = self.render(
                 camera = camera, 

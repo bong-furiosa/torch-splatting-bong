@@ -78,6 +78,9 @@ class GSSTrainer(Trainer):
 if __name__ == "__main__":
     device = 'cuda'
     folder = './B075X65R3X'
+    # (bong-furiosa)
+    # B075X65R3X 데이터셋의 이미지 크기는 512x512입니다.
+    # 데이터를 읽어올 때, 크기를 0.5배 줄여 256x256으로 읽어옵니다.
     data = read_all(folder, resize_factor=0.5)
     data = {k: v.to(device) for k, v in data.items()}
     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
@@ -107,4 +110,6 @@ if __name__ == "__main__":
     )
 
     trainer.on_evaluate_step()
-    trainer.train()
+    # (bong-furiosa)
+    # 저희는 렌더링 단계만 고려하므로 trainer.train()은 생략합니다.
+    # trainer.train()

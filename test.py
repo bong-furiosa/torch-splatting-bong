@@ -1,4 +1,4 @@
-import util_gau
+import gaussian_splatting.util_gau as util_gau
 from PIL import Image
 import math
 import glm
@@ -9,14 +9,17 @@ from gaussian_splatting.gauss_render import homogeneous
 import gaussian_splatting.utils as utils
 
 
-#ply = util_gau.load_ply('bicycle.ply')
-ply = util_gau.naive_gaussian()
+ply = util_gau.load_ply("/home/bongwon/Desktop/3DGS_playground/GaussianSplattingViewer/models/bicycle/point_cloud/iteration_7000/point_cloud.ply")
+# ply = util_gau.naive_gaussian()
 
 means3D = torch.from_numpy(ply.xyz).cuda()
 opacity = torch.from_numpy(ply.opacity).cuda()
 scales = torch.from_numpy(ply.scale).cuda()
 rotations = torch.from_numpy(ply.rot).cuda()
 shs = torch.from_numpy(ply.sh.reshape((rotations.shape[0], -1, 3))).cuda()
+# (bong-furiosa)
+# 기존 torch-splatting의 입력 값을 확인했을 때, dim=1에서 맨 앞만 유효한 shs 값이고 나머지는 전부 0입니다.
+shs[:, 1:, :] = 0
 
 class Camera:
     def __init__(self, h, w):
@@ -80,19 +83,31 @@ class Camera:
 
 camera=  Camera(720,1280)
 
+###################################################
+# PROJECTION PHASE
 def projection_ndc(points, viewmatrix, projmatrix):
     points_o = homogeneous(points) # object space
     points_h = points_o @ viewmatrix @ projmatrix # screen space # RHS
     p_w = 1.0 / (points_h[..., -1:] + 0.000001)
     p_proj = points_h * p_w
     p_view = points_o @ viewmatrix
-    return p_proj, p_view
+    # (bong-furisoa)
+    # 영역 밖의 불필요한 Gaussian이 포함되면 색깔 계산에 잘못 누적되는 것이 아닌가 생각이 들었습니다.
+    # 그래서 in_mask를 부활시키겠습니다.
+    in_mask = p_view[..., 2] >= 0.2
+    return p_proj, p_view, in_mask
 
-mean_ndc, mean_view = projection_ndc(means3D, 
+mean_ndc, mean_view, in_mask = projection_ndc(means3D, 
         viewmatrix=camera.world_view_transform, 
         projmatrix=camera.projection_matrix)
+# (bong-furisoa)
+# Gaussian Sphere들을 in_mask를 사용해서 필터링하겠습니다.
+mean_ndc = mean_ndc[in_mask]
+mean_view = mean_view[in_mask]
 depths = mean_view[:,2]
 
+###################################################
+# BUILD COLOR PHASE
 active_sh_degree = int(np.round(np.sqrt(ply.sh_dim/3)))-1
 def build_color(means3D, shs, camera):
     rays_o = torch.from_numpy(camera.position).cuda()
@@ -101,10 +116,12 @@ def build_color(means3D, shs, camera):
     color = (color + 0.5).clip(min=0.0)
     return color
 
+# (bong-furisoa)
+# Gaussian Sphere들을 in_mask를 사용해서 필터링하겠습니다.
+color = build_color(means3D=means3D[in_mask], shs=shs[in_mask], camera=camera)
 
-color = build_color(means3D=means3D, shs=shs, camera=camera)
-
-
+###################################################
+# BUILD COV3D PHASE
 def build_rotation(r):
     #norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
 
@@ -143,10 +160,13 @@ def build_covariance_3d(s, r):
     actual_covariance = L @ L.transpose(1, 2)
     return actual_covariance
 
+# (bong-furisoa)
+# Gaussian Sphere들을 in_mask를 사용해서 필터링하겠습니다.
 cov3d = build_covariance_3d(scales, rotations)
+cov3d = cov3d[in_mask]
 
-
-
+###################################################
+# BUILD COV2D PHASE
 def build_covariance_2d(
     mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
 ):
@@ -184,7 +204,9 @@ def build_covariance_2d(
     return cov2d[:, :2, :2] + filter[None]
 
 cov2d = build_covariance_2d(
-    mean3d=means3D, 
+    # (bong-furisoa)
+    # Gaussian Sphere들을 in_mask를 사용해서 필터링하겠습니다.
+    mean3d=means3D[in_mask], 
     cov3d=cov3d, 
     viewmatrix=camera.world_view_transform,
     fov_x=camera.FoVx, 
@@ -196,8 +218,8 @@ mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
 mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
 means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)
 
-
-
+###################################################
+# RENDERING PHASE
 def get_radius(cov2d):
     det = cov2d[:, 0, 0] * cov2d[:,1,1] - cov2d[:, 0, 1] * cov2d[:,1,0]
     mid = 0.5 * (cov2d[:, 0,0] + cov2d[:,1,1])
@@ -225,10 +247,10 @@ def render(camera, means2D, cov2d, color, opacity, depths):
     render_alpha = torch.zeros(*pix_coord.shape[:2], 1).to('cuda')
 
     TILE_SIZE = 16
-    #for h in range(0, camera.image_height, TILE_SIZE):
-        #for w in range(0, camera.image_width, TILE_SIZE):
-    for h in range(camera.image_height//2-64, camera.image_height//2+64, TILE_SIZE):
-        for w in range(camera.image_width//2-64, camera.image_width//2+64, TILE_SIZE):
+    for h in range(0, camera.image_height, TILE_SIZE):
+        for w in range(0, camera.image_width, TILE_SIZE):
+    # for h in range(camera.image_height//2-64, camera.image_height//2+64, TILE_SIZE):
+    #     for w in range(camera.image_width//2-64, camera.image_width//2+64, TILE_SIZE):
             # check if the rectangle penetrate the tile
 
             over_tl = rect[0][..., 0].clip(min=w), rect[0][..., 1].clip(min=h)
@@ -284,7 +306,9 @@ out = render(
                 means2D=means2D,
                 cov2d=cov2d,
                 color=color,
-                opacity=opacity, 
+                # (bong-furisoa)
+                # Gaussian Sphere들을 in_mask를 사용해서 필터링하겠습니다.
+                opacity=opacity[in_mask], 
                 depths=depths,
             )
 

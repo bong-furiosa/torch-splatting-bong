@@ -68,7 +68,7 @@ class Camera:
         scale_matrix = np.array([[1.0, 0.0, 0.0, 0.0],
                                     [0.0, 1.0, 0.0, 0.0],
                                     [0.0, 0.0, -1.0, 0.0],
-                                    [0.0, 0.0, 0.0, 1.0]])
+                                    [0.0, 0.0, 0.0, 1.0]],dtype=np.float32)
         return np.matmul(scale_matrix, view_matrix)
 
     def get_project_matrix(self):

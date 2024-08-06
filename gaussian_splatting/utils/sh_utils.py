@@ -57,6 +57,12 @@ def eval_sh(deg, sh, dirs):
     result = C0 * sh[..., 0]
     if deg > 0:
         x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+#####
+        l = (x**2+y**2+z**2)**0.5
+        x/=l
+        y/=l
+        z/=l
+#####
         result = (result -
                 C1 * y * sh[..., 1] +
                 C1 * z * sh[..., 2] -

@@ -19,9 +19,6 @@ opacity = torch.from_numpy(ply.opacity).cuda()
 scales = torch.from_numpy(ply.scale).cuda()
 rotations = torch.from_numpy(ply.rot).cuda()
 shs = torch.from_numpy(ply.sh.reshape((rotations.shape[0], -1, 3))).cuda()
-# (bong-furiosa)
-# 기존 torch-splatting의 입력 값을 확인했을 때, dim=1에서 맨 앞만 유효한 shs 값이고 나머지는 전부 0입니다.
-shs[:, 1:, :] = 0
 
 class Camera:
     def __init__(self, h, w):

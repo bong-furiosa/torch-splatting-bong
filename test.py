@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import gaussian_splatting.util_gau as util_gau
 from PIL import Image
 import math
@@ -9,8 +10,9 @@ from gaussian_splatting.gauss_render import homogeneous
 import gaussian_splatting.utils as utils
 
 
-ply = util_gau.load_ply("/home/bongwon/Desktop/3DGS_playground/GaussianSplattingViewer/models/bicycle/point_cloud/iteration_7000/point_cloud.ply")
-# ply = util_gau.naive_gaussian()
+#ply = util_gau.load_ply("/home/bongwon/Desktop/3DGS_playground/GaussianSplattingViewer/models/bicycle/point_cloud/iteration_7000/point_cloud.ply")
+ply = util_gau.load_ply('bicycle.ply')
+#ply = util_gau.naive_gaussian()
 
 means3D = torch.from_numpy(ply.xyz).cuda()
 opacity = torch.from_numpy(ply.opacity).cuda()
@@ -58,11 +60,16 @@ class Camera:
         self.roll_sensitivity = 0.03
         self.target_dist = 3.
 
-        self.world_view_transform = torch.from_numpy(self.get_view_matrix()).T.cuda()
+        self.world_view_transform = torch.from_numpy(self.get_view_matrix()).T.inverse().cuda()
         self.projection_matrix = torch.from_numpy(self.get_project_matrix()).T.cuda()
 
     def get_view_matrix(self):
-        return np.array(glm.lookAt(self.position, self.target, self.up))
+        view_matrix = np.array(glm.lookAt(self.position, self.target, self.up))
+        scale_matrix = np.array([[1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, -1.0, 0.0],
+                                    [0.0, 0.0, 0.0, 1.0]])
+        return np.matmul(scale_matrix, view_matrix)
 
     def get_project_matrix(self):
         # htanx, htany, focal = self.get_htanfovxy_focal()
@@ -176,7 +183,6 @@ def build_covariance_2d(
 	# Transposes used to account for row-/column-major conventions.
     tan_fovx = math.tan(fov_x * 0.5)
     tan_fovy = math.tan(fov_y * 0.5)
-    #t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
     t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
 
     # truncate the influences of gaussians far outside the frustum.
@@ -196,7 +202,6 @@ def build_covariance_2d(
     # J[..., 2, 1] = ty / t.norm(dim=-1) # discard
     # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
     W = viewmatrix[:3,:3].T # transpose to correct viewmatrix
-
     cov2d = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
     
     # add low pass filter here according to E.q. 32
@@ -249,9 +254,6 @@ def render(camera, means2D, cov2d, color, opacity, depths):
     TILE_SIZE = 16
     for h in range(0, camera.image_height, TILE_SIZE):
         for w in range(0, camera.image_width, TILE_SIZE):
-    # for h in range(camera.image_height//2-64, camera.image_height//2+64, TILE_SIZE):
-    #     for w in range(camera.image_width//2-64, camera.image_width//2+64, TILE_SIZE):
-            # check if the rectangle penetrate the tile
 
             over_tl = rect[0][..., 0].clip(min=w), rect[0][..., 1].clip(min=h)
             over_br = rect[1][..., 0].clip(max=w+TILE_SIZE-1), rect[1][..., 1].clip(max=h+TILE_SIZE-1)
@@ -259,7 +261,6 @@ def render(camera, means2D, cov2d, color, opacity, depths):
             
             if not in_mask.sum() > 0:
                 continue
-            print(w,h)
 
             P = in_mask.sum()
             tile_coord = pix_coord[h:h+TILE_SIZE, w:w+TILE_SIZE].flatten(0,-2)
@@ -312,7 +313,6 @@ out = render(
                 depths=depths,
             )
 
-print(out['radii'])
 image = out['render'].detach().cpu().numpy()
 utils.imwrite(str('test.png'), image)
 

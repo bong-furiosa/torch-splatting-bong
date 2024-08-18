@@ -206,51 +206,98 @@ def render(camera, means2D, cov2d, color, opacity, depths):
     render_depth = torch.zeros(*pix_coord.shape[:2], 1).to('cuda')
     render_alpha = torch.zeros(*pix_coord.shape[:2], 1).to('cuda')
 
-    TILE_SIZE = 32
+    TILE_SIZE = 16
     BATCH_SIZE = 8
+    tile_coords_batch = []
+    h_batch = []
+    w_batch = []
+
     for h in range(0, camera.image_height, TILE_SIZE):
         for w in range(0, camera.image_width, TILE_SIZE):
-
-            over_tl = rect[0][..., 0].clip(min=w), rect[0][..., 1].clip(min=h)
-            over_br = rect[1][..., 0].clip(max=w+TILE_SIZE-1), rect[1][..., 1].clip(max=h+TILE_SIZE-1)
-            in_mask = (over_br[0] > over_tl[0]) & (over_br[1] > over_tl[1]) # 3D gaussian in the tile 
-            
-            if not in_mask.sum() > 0:
-                continue
-
-            P = in_mask.sum()
             tile_coord = pix_coord[h:h+TILE_SIZE, w:w+TILE_SIZE].flatten(0,-2)
-            sorted_depths, index = torch.sort(depths[in_mask])
-            sorted_means2D = means2D[in_mask][index]
-            sorted_cov2d = cov2d[in_mask][index] # P 2 2
-            sorted_conic = sorted_cov2d.inverse() # inverse of variance
-            sorted_opacity = opacity[in_mask][index]
-            sorted_color = color[in_mask][index]
-            #dx = (tile_coord[:,None,:] - sorted_means2D[None,:]) # B P 2
-            # ADDED xy - pixf
-            dx = (-tile_coord[:,None,:] + sorted_means2D[None,:]) # B P 2
-            
-            gauss_weight = torch.exp(-0.5 * (
-                dx[:, :, 0]**2 * sorted_conic[:, 0, 0] 
-                + dx[:, :, 1]**2 * sorted_conic[:, 1, 1]
-                + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
-                + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
+            tile_coords_batch.append(tile_coord)
+            h_batch.append(h)
+            w_batch.append(w)
+                                    
+            if len(tile_coords_batch) == BATCH_SIZE:
+                h_batch_tensor = torch.tensor(h_batch).view(BATCH_SIZE, 1, 1)
+                w_batch_tensor = torch.tensor(w_batch).view(BATCH_SIZE, 1, 1)
 
-            # ADDED added large value filtering 
-            #gauss_weight = gauss_weight * (gauss_weight <= 1)
-            
-            alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # B P 1
-            T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
-            acc_alpha = (alpha * T).sum(dim=1)
-            #tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)
-            tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * 0
-            tile_depth = ((T * alpha) * sorted_depths[None,:,None]).sum(dim=1)
-            
-            # 왼쪽 range와 오른쪽 range가 좀 다른데, 이렇게 해도 괜찮으려나?
-            # TODO: PyTorch가 자동으로 부족한 영역은 그냥 넘어가려나?
-            render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(-1, TILE_SIZE, 3)
-            render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(-1, TILE_SIZE, 1)
-            render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(-1, TILE_SIZE, 1)
+                over_tl = rect[0][..., 0].clip(min=w_batch_tensor), rect[0][..., 1].clip(min=h_batch_tensor)
+                over_br = rect[1][..., 0].clip(max=w_batch_tensor + TILE_SIZE - 1), rect[1][..., 1].clip(max=h_batch_tensor + TILE_SIZE - 1)
+                
+                in_mask = (over_br[0] > over_tl[0]) & (over_br[1] > over_tl[1]) # 3D gaussian in the tile 
+
+                # Batch 단위 연산을 수해아므로, Tile 단위 조건문은 잠시 주석 처리
+                # if not in_mask.sum() > 0:
+                #     tile_coords_batch = []
+                #     h_batch = []
+                #     w_batch = []                    
+                #     continue
+
+                P = in_mask.sum(dim=-1) # in_mask 1개 shape = torch.Size([2634990])
+                max_P = P.max().item()
+
+                indices = torch.arange(max_P, device=depths.device).expand(BATCH_SIZE, max_P)
+                padded_depths = torch.full((BATCH_SIZE, max_P), torch.inf, device=depths.device)
+                padded_means2D = torch.ones((BATCH_SIZE, max_P, 2), device=means2D.device)
+                # padded_cov2d = torch.randn((BATCH_SIZE, max_P, 2, 2), device=cov2d.device)
+                padded_cov2d = torch.eye(2).expand(BATCH_SIZE, max_P, 2, 2).clone()
+                padded_opacity = torch.zeros((BATCH_SIZE, max_P), device=opacity.device)
+                padded_color = torch.zeros((BATCH_SIZE, max_P, 3), device=color.device)
+
+                for i in range(BATCH_SIZE):
+                    padded_depths[i, :P[i]] = depths[in_mask[i, 0]]
+                    padded_means2D[i, :P[i]] = means2D[in_mask[i, 0]]
+                    padded_cov2d[i, :P[i]] = cov2d[in_mask[i, 0]]
+                    padded_opacity[i, :P[i]] = opacity[in_mask[i, 0]].view(-1)
+                    padded_color[i, :P[i]] = color[in_mask[i, 0]]
+               
+                sorted_depths, indices = torch.sort(padded_depths, dim=-1)
+                sorted_means2D = torch.gather(padded_means2D, 1, indices.unsqueeze(-1).expand(BATCH_SIZE, -1, 2))
+                sorted_cov2d = torch.gather(padded_cov2d, 1, indices.unsqueeze(-1).unsqueeze(-1).expand(BATCH_SIZE, -1, 2, 2))
+                sorted_conic = sorted_cov2d.inverse()
+                sorted_opacity = torch.gather(padded_opacity, 1, indices)
+                sorted_color = torch.gather(padded_color, 1, indices.unsqueeze(-1).expand(BATCH_SIZE, -1, 3))
+
+
+                tile_coords_batch = torch.stack(tile_coords_batch) # (BATCH_SIZE, TILE_SIZE^2, 2)
+                dx = (-tile_coords_batch[:, :, None, :] + sorted_means2D[:, None, :])  # shape: (BATCH_SIZE, TILE_SIZE^2, max_P, 2)
+                gauss_weight = torch.exp(-0.5 * (
+                    dx[:, :, :, 0]**2 * sorted_conic[:, :, 0, 0].unsqueeze(1) +
+                    dx[:, :, :, 1]**2 * sorted_conic[:, :, 1, 1].unsqueeze(1) +
+                    dx[:, :, :, 0] * dx[:, :, :, 1] * sorted_conic[:, :, 0, 1].view(-1, 1, max_P) +
+                    dx[:, :, :, 0] * dx[:, :, :, 1] * sorted_conic[:, :, 1, 0].view(-1, 1, max_P)
+                ))
+                # 패딩된 torch.inf 값에 대한 마스크 생성
+                # 잠시 무시...? 😡
+                # valid_mask = sorted_depths != torch.inf
+                # gauss_weight = gauss_weight * valid_mask[:, None, :]  # 패딩된 부분 무시
+
+                alpha = (gauss_weight * sorted_opacity[:, None, :]).clip(max=0.99)  # (BATCH_SIZE, TILE_SIZE^2, max_P, 1)
+                T = torch.cat([torch.ones_like(alpha[:, :, :1]), 1 - alpha[:, :, :-1]], dim=2).cumprod(dim=2)
+                acc_alpha = (alpha * T).sum(dim=2)
+                
+                tile_color = ((T * alpha).unsqueeze(-1) * sorted_color.unsqueeze(1).expand(-1, TILE_SIZE * TILE_SIZE, -1, -1)).sum(dim=2)
+                tile_depth = ((T * alpha) * sorted_depths.unsqueeze(1).expand(-1, TILE_SIZE * TILE_SIZE, -1)).sum(dim=2)
+
+                # 타일 업데이트
+                for idx, (_h, _w) in enumerate(zip(h_batch_tensor, w_batch_tensor)):
+                    render_color[_h:_h+TILE_SIZE, _w:_w+TILE_SIZE] = tile_color[idx].view(TILE_SIZE, TILE_SIZE, 3)
+                    render_depth[_h:_h+TILE_SIZE, _w:_w+TILE_SIZE] = tile_depth[idx].view(TILE_SIZE, TILE_SIZE, 1)
+                    render_alpha[_h:_h+TILE_SIZE, _w:_w+TILE_SIZE] = acc_alpha[idx].view(TILE_SIZE, TILE_SIZE, 1)
+
+                # 다음 배치를 위해 초기화
+                tile_coords_batch = []
+                h_batch = []
+                w_batch = []
+                torch.cuda.empty_cache()
+
+    # 마지막 남은 타일들 처리 (배치 크기보다 작을 때)
+    if tile_coords_batch:
+        tile_coords_batch = torch.stack(tile_coords_batch)
+        # 동일한 연산 수행 (위 코드와 동일)
+        # ...
 
     return {
         "render": render_color,
@@ -333,8 +380,8 @@ if __name__ == "__main__":
     camera_positions = [(0.0, 0.0, z) for z in positions_z]    
 
     # for idx, camera_position in enumerate([camera_positions[0], camera_positions[20], camera_positions[-1], camera_positions[0]]):
-    for idx, camera_position in enumerate([camera_positions[0]]):
+    for idx, camera_position in enumerate([camera_positions[0], camera_positions[-1]]):
         camera = Camera(720,1280, camera_position[0], camera_position[1], camera_position[2])
         out = main(ply, means3D, opacity, scales, rotations, cov3d, shs, camera)
         image = out['render'].detach().cpu().numpy()
-        utils.imwrite(str(f'./results/test_{idx:03d}.png'), image)
+        utils.imwrite(str(f'./refactoring_results/test_{idx:03d}.png'), image)

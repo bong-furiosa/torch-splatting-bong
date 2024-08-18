@@ -57,7 +57,7 @@ class Camera:
         self.roll_sensitivity = 0.03
         self.target_dist = 3.
 
-        self.world_view_transform = torch.from_numpy(self.get_view_matrix()).T.inverse().cuda()
+        self.world_view_transform = torch.from_numpy(self.get_view_matrix()).T.cuda()
         self.projection_matrix = torch.from_numpy(self.get_project_matrix()).T.cuda()
 
     def get_view_matrix(self):
